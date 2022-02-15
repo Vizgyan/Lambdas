@@ -1,0 +1,6 @@
+SumArray = LAMBDA(Rng,[Option],
+        SWITCH(Option,
+                0, BYROW(Rng, LAMBDA(a,sum(a))),
+                1, BYCOL(Rng, LAMBDA(a, sum(a)))
+                ) 
+        );
