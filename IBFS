@@ -1,0 +1,132 @@
+// Function to calculate the Initial Basic Feasible Solution (IBFS) using modified Vogel's Approximation Method
+// The function takes three input tables: cost table, supply table, and demand table
+// The cost table contains the costs associated with each supply and demand centre
+// The supply table contains the available quantities at each supply centre
+// The demand table contains the required quantities at each demand centre
+// The function returns a table with the allocation of quantities from supply centres to demand centres
+IBFS = LAMBDA(_CostTbl, _SupplyTbl, _DemandTbl, [SortCol], [Include_Header], // Input tables: cost, supply, and demand, and optional parameter for including header
+    LET(
+        //Filter cost table to only retain the supply and demand centres that still exist
+        RvCostTbl, FILTER(
+            _CostTbl,
+            COUNTIFS(TAKE(_SupplyTbl, , 1), INDEX(_CostTbl, , 1)) *
+                COUNTIFS(TAKE(_DemandTbl, , 1), INDEX(_CostTbl, , 2))
+        ),
+        // Combine cost, supply, and demand tables into a single table with placeholders
+        FirstTbl, HSTACK(RvCostTbl, _SupplyTbl, _DemandTbl, HSTACK("NA", "NA", 0, 0)),
+        // Create a sequence for iteration        
+        Ns, SEQUENCE(ROWS(_SupplyTbl) + ROWS(_DemandTbl) + 1),
+        Err, NA(),
+        //Create a custom function that will split tables based on st and end col
+        DiceTbl, LAMBDA(Tbl, StCl, [EndCl],
+            LET(
+                NCol, COLUMNS(Tbl),
+                _EndCl, IF(ISOMITTED(EndCl), NCol, EndCl),
+                DTbl, DROP(DROP(Tbl, , StCl - 1), , _EndCl - Ncol),
+                FILTER(DTbl, NOT(ISNA(CHOOSECOLS(Dtbl, 1))))
+            )
+        ),
+        RemoveNARows, LAMBDA(Array, ColNo, FILTER(Array, NOT(ISNA(CHOOSECOLS(Array, ColNo))))),
+        FinalTbl, REDUCE(
+            // Initialize the final table with the combined table
+            FirstTbl,
+            Ns,
+            LAMBDA(CombTbl, Iter,
+                IF( //check whether all the supply and demand are met
+                    SUM(TAKE(CombTbl, 1, 3)) = -PI(), // -pi() is the forced value of first row when all supply and demand are met
+                    CombTbl, // If yes, return the final table as it is
+                    // Otherwise, continue the allocation process  
+                    LET(
+                        // Extract relevant columns for cost, supply, and demand
+                        CostTbl, TAKE(RemoveNARows(CombTbl, 1), , 3),
+                        SupplyTbl, DROP(TAKE(RemoveNARows(CombTbl, 4), , 5), , 3),
+                        DemandTbl, DROP(TAKE(RemoveNARows(CombTbl, 6), , 7), , 5),
+                        Results, TAKE(RemoveNARows(CombTbl, 8), , -4),
+                        
+                        // Extract supply and demand quantities
+                        Ss, CHOOSECOLS(SupplyTbl, 2),
+                        Ds, CHOOSECOLS(DemandTbl, 2),
+                        
+                        // Extract cost table details including supply and demand centres and costs
+                        Nrows, ROWS(CostTbl),
+                        Sc, CHOOSECOLS(CostTbl, 1),
+                        Dc, CHOOSECOLS(CostTbl, 2),
+                        Costs, CHOOSECOLS(CostTbl, 3),
+                        
+                        // Calculate penalties for demand centres as the difference between the cost and the minimum cost offered by other supply centres
+                        Diff1, MAP(
+                            Sc,
+                            Dc,
+                            Costs,
+                            LAMBDA(a, b, c, c - MIN(FILTER(Costs, (Dc = b) * (Sc <> a), 0)))
+                        ),
+                        // Calculate penalties for supply centres as the difference between the cost and the minimum cost need for other demand centres
+                        Diff2, MAP(
+                            Sc,
+                            Dc,
+                            Costs,
+                            LAMBDA(a, b, c, c - MIN(FILTER(Costs, (Dc <> b) * (Sc = a), 0)))
+                        ),
+                        // Combine penalties
+                        Diff, VSTACK(Diff1, Diff2),
+                        
+                        // Determine the cell with the highest penalty; highest is determined using the MIN function as penalties are negative
+                        Nthrow, MOD(XMATCH(MIN(Diff), Diff, 0) - 1, Nrows) + 1,
+                        // Get the supply and demand centre for the selected rows
+                        SelectS, INDEX(Sc, Nthrow),
+                        SelectD, INDEX(Dc, Nthrow),
+                        
+                        // Determine the quantity to allocate; allocated quantity is the minimum of supply available and demand
+                        SQty, VLOOKUP(SelectS, SupplyTbl, 2, 0),
+                        DQty, VLOOKUP(SelectD, DemandTbl, 2, 0),
+                        FilledQty, MIN(SQty, DQty),
+                        Costpu, XLOOKUP(
+                            SelectS & SelectD,
+                            CHOOSECOLS(CostTbl, 1) & CHOOSECOLS(CostTbl, 2),
+                            CHOOSECOLS(CostTbl, 3)
+                        ),
+                        
+                        // Update supply, demand and cost tables
+                        // If filled quantity is the supply quantity, then supply centre needs to be eliminated and alternatively if filled quantity is the demand quantity, then demand centre is eliminated
+                        FirstCondtn, IF(FilledQty = SQty, (Sc <> SelectS), 1),
+                        SecondCondtn, IF(FilledQty = DQty, (Dc <> SelectD), 1),
+                        NewCostTbl, FILTER(
+                            CostTbl,
+                            FirstCondtn * SecondCondtn,
+                            HSTACK("NA", "NA", -PI())
+                        ),
+                        // Update supply tables to reduce the quantity allocated from the selected supply centre
+                        NewSupplytbl, LET(
+                            FirstCol, CHOOSECOLS(SupplyTbl, 1),
+                            Secondcol, CHOOSECOLS(SupplyTbl, 2),
+                            Vals, IF(FirstCol = SelectS, Secondcol - FilledQty, Secondcol),
+                            HSTACK(FirstCol, Vals)
+                        ),
+                        // Update demand table to reduce the quantity allocated to the selected demand centre
+                        NewDemandtbl, LET(
+                            FirstCol, CHOOSECOLS(DemandTbl, 1),
+                            Secondcol, CHOOSECOLS(DemandTbl, 2),
+                            Vals, IF(FirstCol = SelectD, Secondcol - FilledQty, Secondcol),
+                            HSTACK(FirstCol, Vals)
+                        ),
+                        
+                        // Update the results table with the new allocation
+                        NewOutput, VSTACK(
+                            Results,
+                            HSTACK(SelectS, SelectD, FilledQty, FilledQty * Costpu)
+                        ),
+                        
+                        // Combine updated tables for the next iteration
+                        HSTACK(NewCostTbl, NewSupplytbl, NewDemandtbl, NewOutput)
+                    )
+                )
+            )
+        ),
+        AllocTbl, RemoveNARows(TAKE(DROP(FinalTbl, 1), , -4), 1), // Extract the final allocation table
+        _AllocTbl, IF(ISOMITTED(SortCol), AllocTbl, SORT(AllocTbl, SortCol)),
+        Header, {"Supply Centre", "Demand Centre", "Qty", "Total_Cost"}, // Header for the output table
+        // Combine header and allocation table and return the result
+        Return, IF(Include_Header, VSTACK(Header, _AllocTbl), _AllocTbl),
+        Return
+    )
+);
